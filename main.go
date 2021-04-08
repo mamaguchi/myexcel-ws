@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"context"
 	"flag"
 	"time"
     "errors"
@@ -11,7 +12,8 @@ import (
     "github.com/tealeg/xlsx"
 	"pg_service/db"
 	"myexcel/data"
-	"github.com/kr/pretty"
+	"googlemaps.github.io/maps"
+	// "github.com/kr/pretty"
 )
 
 var (
@@ -79,7 +81,7 @@ func parseLinelisting(excelFile string) {
 	if !ok {
 		panic(errors.New("Sheet 'LINELISTING' not found"))
 	}
-	fmt.Println("Max row is", sh.MaxRow)
+	fmt.Println("Max row is", sh.MaxRow-1)//1st row is header
 	sh.ForEachRow(rowVisitorLinelisting)
 }
 
@@ -92,11 +94,17 @@ func geocode() {
 	check(err)
 
 	db.CheckDbConn()
-	persons, err := data.GetPersons(db.Conn)
+	linelisting, err := data.GetPersons(db.Conn)
 	check(err)
-	// pretty.Println(persons)
+	// pretty.Println(linelisting)
 
-	for _, person := range persons {
+	ok_result := 0
+	no_result := 0
+	err_result := 0
+	fmt.Print("\033[s")
+	for i, person := range linelisting.Persons {
+		fmt.Print("\033[u\033[K")
+		fmt.Printf("Geocoding linelisting row: %v\n", i+1)
 		address := fmt.Sprintf("%s, %s", person.Address, person.State)	
 		r := &maps.GeocodingRequest{
 			Address:  address,
@@ -107,10 +115,11 @@ func geocode() {
 		resp, err := client.Geocode(context.Background(), r)
 		// 'err' will not be nil if Geocode status != "OK" && != "ZERO_RESULTS".
 		if err != nil {
+			err_result++
 			errFirstSplit := strings.Split(err.Error(), "-")[0]
 			errSecondSplit := strings.Split(errFirstSplit, ":")[1]
 			errSecondSplit = strings.TrimSpace(errSecondSplit)
-			invldGeocodedPersonAddr := GeocodedPersonAddrIn{
+			invldGeocodedPersonAddr := data.GeocodedPersonAddrIn{
 				Bil: person.Bil,
 				GeocodeStatus: errSecondSplit,
 			}
@@ -121,7 +130,8 @@ func geocode() {
 
 		// Now we check for "ZERO_RESULTS" Geocode status.
 		if len(resp) == 0 {
-			invldGeocodedPersonAddr := GeocodedPersonAddrIn{
+			no_result++
+			invldGeocodedPersonAddr := data.GeocodedPersonAddrIn{
 				Bil: person.Bil,
 				GeocodeStatus: "ZERO_RESULTS",
 			}
@@ -135,7 +145,8 @@ func geocode() {
 		// fmt.Println(resp[0].FormattedAddress)
 		// fmt.Printf("Longitude: %v\n", resp[0].Geometry.Location.Lng)
 		// fmt.Printf("Latitude: %v\n", resp[0].Geometry.Location.Lat)
-		geocodedPersonAddr := GeocodedPersonAddrIn{
+		ok_result++
+		geocodedPersonAddr := data.GeocodedPersonAddrIn{
 			Bil: person.Bil,
 			Lon: resp[0].Geometry.Location.Lng,
 			Lat: resp[0].Geometry.Location.Lat,
@@ -144,7 +155,11 @@ func geocode() {
 		}
 		db.CheckDbConn()
 		data.UpdatePersonGeocodedAddr(db.Conn, geocodedPersonAddr)
-	}		
+	}	
+	fmt.Println("Geocode Total Results:", (ok_result+no_result+err_result))	
+	fmt.Println("\tOk result  - ", ok_result)
+	fmt.Println("\tNo result  - ", no_result)
+	fmt.Println("\tErr result - ", err_result)
 }
 
 func main() {
