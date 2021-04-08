@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"flag"
 	"time"
     "errors"
     "fmt"
@@ -8,39 +10,23 @@ import (
 	"strings"
     "github.com/tealeg/xlsx"
 	"pg_service/db"
-	"myexcel/excel"
+	"myexcel/data"
+	"github.com/kr/pretty"
 )
 
-/* tealeg xlsx package tutorial */
-func cellVisitor(c *xlsx.Cell) error {
-    value, err := c.FormattedValue()
-    if err != nil {
-        fmt.Println(err.Error())
-    } else {
-        fmt.Println("Cell value:", value)
-    }
-    return err
+var (
+	mode = flag.String("mode", "", `
+	Please specify a running mode for this program:
+	1. parse_excel	-	read excel data into the database
+	2. geocode	-	geocode the address in the database`)	
+)
+
+func usageAndExit() {
+	fmt.Println("Flags:")
+	flag.PrintDefaults()
+	os.Exit(2)
 }
 
-func rowVisitor(r *xlsx.Row) error {
-    return r.ForEachCell(cellVisitor)
-}
-
-func rowStuff() {
-    filename := "samplefile.xlsx"
-    wb, err := xlsx.OpenFile(filename)
-    if err != nil {
-        panic(err)
-    }
-    sh, ok := wb.Sheet["Sample"]
-    if !ok {
-        panic(errors.New("Sheet not found"))
-    }
-    fmt.Println("Max row is", sh.MaxRow)
-    sh.ForEachRow(rowVisitor)
-}
-
-/* My Code */
 func check(err error) {
 	if err != nil {
 		log.Fatalf("fatal error: %s", err)
@@ -67,7 +53,7 @@ func rowVisitorLinelisting(r *xlsx.Row) error {
 	ident = strings.ReplaceAll(ident, "-", "")
 
 	// fmt.Printf("%v, %v, %v, %v\n", name, ident, tel, address)
-	newPerson := excel.NewPersonIn{
+	newPerson := data.NewPersonIn{
 		Bil: bil,
 		Name: name,
 		Ident: ident,
@@ -78,7 +64,7 @@ func rowVisitorLinelisting(r *xlsx.Row) error {
 	}	
 
 	db.CheckDbConn()
-	err = excel.AddNewPerson(db.Conn, newPerson)
+	err = data.AddNewPerson(db.Conn, newPerson)
     check(err) 
 
 	return nil
@@ -97,20 +83,90 @@ func parseLinelisting(excelFile string) {
 	sh.ForEachRow(rowVisitorLinelisting)
 }
 
-func main() {
-    /* tealeg xlsx package tutorial */
-    // rowStuff()
+func geocode() {
+	GMAP_API_KEY := os.Getenv("GMAP_API_KEY")
+	if GMAP_API_KEY == "" {
+		log.Fatalf("Google maps api key not found!")
+	}
+	client, err := maps.NewClient(maps.WithAPIKey(GMAP_API_KEY))
+	check(err)
 
-	/* INIT DATABASE CONNECTION */
+	db.CheckDbConn()
+	persons, err := data.GetPersons(db.Conn)
+	check(err)
+	// pretty.Println(persons)
+
+	for _, person := range persons {
+		address := fmt.Sprintf("%s, %s", person.Address, person.State)	
+		r := &maps.GeocodingRequest{
+			Address:  address,
+			Language: "en",
+			Region:   "my",
+		}
+
+		resp, err := client.Geocode(context.Background(), r)
+		// 'err' will not be nil if Geocode status != "OK" && != "ZERO_RESULTS".
+		if err != nil {
+			errFirstSplit := strings.Split(err.Error(), "-")[0]
+			errSecondSplit := strings.Split(errFirstSplit, ":")[1]
+			errSecondSplit = strings.TrimSpace(errSecondSplit)
+			invldGeocodedPersonAddr := GeocodedPersonAddrIn{
+				Bil: person.Bil,
+				GeocodeStatus: errSecondSplit,
+			}
+			db.CheckDbConn()
+			data.UpdateInvldPersonGeocodedAddr(db.Conn, invldGeocodedPersonAddr)
+			continue
+		}
+
+		// Now we check for "ZERO_RESULTS" Geocode status.
+		if len(resp) == 0 {
+			invldGeocodedPersonAddr := GeocodedPersonAddrIn{
+				Bil: person.Bil,
+				GeocodeStatus: "ZERO_RESULTS",
+			}
+			db.CheckDbConn()
+			data.UpdateInvldPersonGeocodedAddr(db.Conn, invldGeocodedPersonAddr)
+			continue
+		}
+
+		// Here we print the Geocode result.
+		// pretty.Println(resp)
+		// fmt.Println(resp[0].FormattedAddress)
+		// fmt.Printf("Longitude: %v\n", resp[0].Geometry.Location.Lng)
+		// fmt.Printf("Latitude: %v\n", resp[0].Geometry.Location.Lat)
+		geocodedPersonAddr := GeocodedPersonAddrIn{
+			Bil: person.Bil,
+			Lon: resp[0].Geometry.Location.Lng,
+			Lat: resp[0].Geometry.Location.Lat,
+			FormattedAddr: resp[0].FormattedAddress,
+			GeocodeStatus: "OK",
+		}
+		db.CheckDbConn()
+		data.UpdatePersonGeocodedAddr(db.Conn, geocodedPersonAddr)
+	}		
+}
+
+func main() {
+	/* INIT POSTGRESQL DATABASE CONNECTION */
 	db.Open()
 	defer db.Close()
 	
 	start := time.Now()
+	flag.Parse()
 
-	// filename := "Masterlist Test.xlsx"
-	filename := "Masterlist dari March 2021.xlsx"
-	parseLinelisting(filename)   
+	if *mode == "parse_excel" {
+		fmt.Println("Parsing excel data into database...")
+		filename := "Masterlist dari March 2021.xlsx"
+		parseLinelisting(filename) 
+	} else if *mode == "geocode" {
+		fmt.Println("Geocoding the address in database...")
+		geocode()
+	} else {
+		usageAndExit()
+	}
 
-	execDuration := time.Since(start) 	
+	execDuration := time.Since(start) 
+	fmt.Println("Done")	
 	fmt.Println("Execution time: ", execDuration)
 }
